@@ -112,6 +112,8 @@ with sync_playwright() as p:
     ok(c01.locator("a.wa").get_attribute("href") == "https://wa.me/50499990000", "WhatsApp al contacto con prefijo 504")
     ok(c01.locator("a[href='tel:27850000']").count() == 1, "boton para llamar al telefono")
     ok(pg.locator("section[data-asig='A1'] li[data-cli='c02'] a.waze").count() == 0, "sin ubicacion: no muestra Waze/Maps")
+    ok(pg.locator("section[data-asig='A1'] li[data-cli='c02'] a.wa").count() == 0, "solo linea fija (empieza con 2): no muestra WhatsApp")
+    ok(pg.locator("section[data-asig='A1'] li[data-cli='c02'] a[href='tel:27851111']").count() == 1, "solo linea fija: si muestra Llamar")
     ok(pg.evaluate("window.__xss") is None and "<img" in pg.inner_text("section[data-asig='A1'] li[data-cli='c03'] h3"),
        "un nombre con codigo malicioso se muestra como texto y NO se ejecuta")
     ok("firma válida" in pg.inner_text("section[data-asig='A1'] li[data-cli='c04']") and "Cliente Alterado" not in tarjetas,

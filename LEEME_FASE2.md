@@ -9,7 +9,7 @@ App web instalable (PWA) para Android. El técnico ve **solo** sus clientes auto
 | `dist/` | **La app lista para publicar** (GitHub Pages). Es lo único que se sube. |
 | `src/` | Código fuente (configuración, cifrado, acceso a Firebase, pantallas). |
 | `public/` | HTML, estilos, iconos, manifiesto y service worker. |
-| `test/` | Prueba de punta a punta (45 casos) con servidor simulado y cifrado real del Divisor. |
+| `test/` | Prueba de punta a punta (47 casos) con servidor simulado y cifrado real del Divisor. |
 | `capturas/` | Pantallas de la app tomadas durante la prueba. |
 | `build.mjs` | Construye `dist/` (`node build.mjs`). |
 

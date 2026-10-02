@@ -270,7 +270,10 @@ function vistaCodigo(compacta = false) {
 function enlaces(d) {
   const tel = String(d.telefono || '').replace(/\D/g, '');
   const contacto = String(d.contacto || '').replace(/\D/g, '');
-  const wa = contacto || tel;
+  // WhatsApp solo para celulares: en Honduras las lineas fijas empiezan con 2 y no tienen WhatsApp.
+  const local = (n) => (n.length === 11 && n.startsWith(PREFIJO_PAIS) ? n.slice(3) : n);
+  const esCelular = (n) => /^[3-9]\d{7}$/.test(local(n));
+  const wa = [contacto, tel].find((n) => n && esCelular(n)) || '';
   const geo = d.lat != null && d.lon != null;
   return `
     <div class="acciones">
@@ -278,7 +281,7 @@ function enlaces(d) {
                <a class="btn maps" href="https://www.google.com/maps/dir/?api=1&destination=${d.lat},${d.lon}" target="_blank" rel="noopener">Google Maps</a>` : ''}
       ${tel ? `<a class="btn" href="tel:${tel}">Llamar ${esc(d.telefono)}</a>` : ''}
       ${contacto && contacto !== tel ? `<a class="btn" href="tel:${contacto}">Llamar contacto</a>` : ''}
-      ${wa ? `<a class="btn wa" href="https://wa.me/${wa.length === 8 ? PREFIJO_PAIS + wa : wa}" target="_blank" rel="noopener">WhatsApp</a>` : ''}
+      ${wa ? `<a class="btn wa" href="https://wa.me/${PREFIJO_PAIS + local(wa)}" target="_blank" rel="noopener">WhatsApp</a>` : ''}
     </div>`;
 }
 
