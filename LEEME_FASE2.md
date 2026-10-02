@@ -9,14 +9,14 @@ App web instalable (PWA) para Android. El técnico ve **solo** sus clientes auto
 | `dist/` | **La app lista para publicar** (GitHub Pages). Es lo único que se sube. |
 | `src/` | Código fuente (configuración, cifrado, acceso a Firebase, pantallas). |
 | `public/` | HTML, estilos, iconos, manifiesto y service worker. |
-| `test/` | Prueba de punta a punta (47 casos) con servidor simulado y cifrado real del Divisor. |
+| `test/` | Prueba de punta a punta (49 casos) con servidor simulado y cifrado real del Divisor. |
 | `capturas/` | Pantallas de la app tomadas durante la prueba. |
 | `build.mjs` | Construye `dist/` (`node build.mjs`). |
 
 ## Pantallas
 
 - **Iniciar sesión** + **código QR del teléfono** (el administrador lo registra una vez).
-- **Mis visitas**: clientes del día con Waze, Google Maps, llamar y WhatsApp; hora de cierre y tiempo restante; botones **Cliente encontrado** (con GPS opcional) y **No encontrado** (con motivo).
+- **Mis visitas**: clientes del día con Waze, Google Maps, Apple Maps (en iPhone) u "Otra app de mapas" (en Android), llamar y WhatsApp (solo a celulares); hora de cierre y tiempo restante; botones **Cliente encontrado** (con GPS opcional) y **No encontrado** (con motivo).
 - **Mi código**: QR, huella corta, copiar y compartir.
 - **Diagnóstico**: confirma sesión, que el servidor reconoce el rol, que el teléfono está registrado y que la llave del Divisor está configurada.
 
@@ -28,6 +28,14 @@ App web instalable (PWA) para Android. El técnico ve **solo** sus clientes auto
 - Se borra todo: a la hora de cierre, al revocar, al desactivar al técnico, al cerrar sesión y si la app pasa **más de 5 minutos** en segundo plano.
 - Política de seguridad de contenido (CSP) estricta y textos escapados (un nombre con código malicioso se muestra como texto).
 - **Falla cerrada**: sin la llave del Divisor (fase 4) o con un teléfono no registrado, no muestra clientes.
+
+## Instalación en el teléfono
+
+- **Android (Chrome):** abrir el enlace → "Instalar aplicación" (o menú ⋮ → "Agregar a la pantalla principal").
+- **iPhone (iOS 15+):** abrir el enlace en **Safari** → Compartir → "Agregar a pantalla de inicio".
+- **Importante en iPhone:** el código QR se muestra **desde el ícono ya instalado**, no desde Safari (en iPhone cada uno guarda sus datos aparte y generaría otro código).
+- Si se borra la app o los datos del navegador, se genera un código nuevo y hay que registrarlo otra vez.
+- Las pruebas automáticas corrieron en Chrome; en el piloto, probar al menos un iPhone.
 
 ## Pendiente para usarla en campo
 

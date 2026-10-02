@@ -109,6 +109,13 @@ with sync_playwright() as p:
     c01 = pg.locator("section[data-asig='A1'] li[data-cli='c01']")
     ok(c01.locator("a.waze").get_attribute("href") == "https://waze.com/ul?ll=14.8497,-85.8943&navigate=yes", "enlace a Waze correcto")
     ok("destination=14.8497,-85.8943" in c01.locator("a.maps").get_attribute("href"), "enlace a Google Maps correcto")
+    ok(c01.locator("a.otra").get_attribute("href") == "geo:14.8497,-85.8943?q=14.8497,-85.8943" and c01.locator("a.apple").count() == 0,
+       "Android: boton 'Otra app de mapas' (y sin Apple Maps)")
+    pg.evaluate("Object.defineProperty(navigator, 'userAgent', {get: () => 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', configurable: true})")
+    pg.click("[data-pestana='visitas']")
+    ok(c01.locator("a.apple").get_attribute("href") == "https://maps.apple.com/?daddr=14.8497,-85.8943&dirflg=d" and c01.locator("a.otra").count() == 0,
+       "iPhone: boton 'Apple Maps' (y sin 'Otra app')")
+    pg.evaluate("delete navigator.userAgent"); pg.click("[data-pestana='visitas']")
     ok(c01.locator("a.wa").get_attribute("href") == "https://wa.me/50499990000", "WhatsApp al contacto con prefijo 504")
     ok(c01.locator("a[href='tel:27850000']").count() == 1, "boton para llamar al telefono")
     ok(pg.locator("section[data-asig='A1'] li[data-cli='c02'] a.waze").count() == 0, "sin ubicacion: no muestra Waze/Maps")

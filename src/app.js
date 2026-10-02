@@ -267,6 +267,10 @@ function vistaCodigo(compacta = false) {
   </section>`;
 }
 
+// iPhone/iPad (incluye iPad que se presenta como Mac).
+const esIPhone = () => /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 function enlaces(d) {
   const tel = String(d.telefono || '').replace(/\D/g, '');
   const contacto = String(d.contacto || '').replace(/\D/g, '');
@@ -278,7 +282,10 @@ function enlaces(d) {
   return `
     <div class="acciones">
       ${geo ? `<a class="btn waze" href="https://waze.com/ul?ll=${d.lat},${d.lon}&navigate=yes" target="_blank" rel="noopener">Waze</a>
-               <a class="btn maps" href="https://www.google.com/maps/dir/?api=1&destination=${d.lat},${d.lon}" target="_blank" rel="noopener">Google Maps</a>` : ''}
+               <a class="btn maps" href="https://www.google.com/maps/dir/?api=1&destination=${d.lat},${d.lon}" target="_blank" rel="noopener">Google Maps</a>
+               ${esIPhone()
+    ? `<a class="btn apple" href="https://maps.apple.com/?daddr=${d.lat},${d.lon}&dirflg=d" target="_blank" rel="noopener">Apple Maps</a>`
+    : `<a class="btn otra" href="geo:${d.lat},${d.lon}?q=${d.lat},${d.lon}">Otra app de mapas</a>`}` : ''}
       ${tel ? `<a class="btn" href="tel:${tel}">Llamar ${esc(d.telefono)}</a>` : ''}
       ${contacto && contacto !== tel ? `<a class="btn" href="tel:${contacto}">Llamar contacto</a>` : ''}
       ${wa ? `<a class="btn wa" href="https://wa.me/${PREFIJO_PAIS + local(wa)}" target="_blank" rel="noopener">WhatsApp</a>` : ''}

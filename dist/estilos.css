@@ -51,6 +51,8 @@ dt { color: var(--suave); } dd { margin: 0; word-break: break-word; }
 .btn { display: flex; align-items: center; justify-content: center; text-align: center; text-decoration: none; background: #f3f6f9; color: var(--texto); border: 1px solid var(--borde); font-size: .92rem; }
 .btn.waze { background: #33ccff; color: #062b3a; border-color: #33ccff; font-weight: 600; }
 .btn.maps { background: #e8f0fe; color: #174ea6; border-color: #c6dafc; font-weight: 600; }
+.btn.apple { background: #f2f2f7; color: #111; border-color: #c7c7cc; font-weight: 600; }
+.btn.otra { font-weight: 600; }
 .btn.wa { background: #25d366; color: #063d1d; border-color: #25d366; font-weight: 600; }
 .resultado { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--borde); }
 .vacio { text-align: center; padding: 28px 16px; }
