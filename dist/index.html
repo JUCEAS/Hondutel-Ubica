@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b4f8a">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="no-referrer">
+  <title>Hondutel Ubica</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icono-192.png">
+  <link rel="apple-touch-icon" href="icono-192.png">
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+  <header class="barra">
+    <div>
+      <h1>Hondutel Ubica</h1>
+      <p id="quien"></p>
+    </div>
+    <button id="salir" class="enlace" data-accion="salir" hidden>Salir</button>
+  </header>
+  <nav id="pestanas" hidden>
+    <button data-pestana="visitas">Mis visitas</button>
+    <button data-pestana="codigo">Mi código</button>
+    <button data-pestana="diagnostico">Diagnóstico</button>
+  </nav>
+  <div id="aviso" class="aviso" hidden role="status"></div>
+  <main id="app"><section class="tarjeta"><p>Cargando…</p></section></main>
+  <div id="modal" hidden><div id="modal-caja" role="dialog" aria-modal="true"></div></div>
+  <noscript>Esta aplicación necesita JavaScript.</noscript>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

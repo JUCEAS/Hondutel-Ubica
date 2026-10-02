@@ -1,0 +1,22 @@
+{
+  "name": "hondutel-ubica-app",
+  "version": "2.0.0",
+  "description": "",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:prueba": "node build.mjs --prueba"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "firebase": "^12.19.0",
+    "qrcode": "^1.5.4"
+  },
+  "private": true,
+  "type": "module"
+}
