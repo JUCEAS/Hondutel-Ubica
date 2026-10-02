@@ -2,7 +2,7 @@
 // Solo guarda la "cascara" de la app (HTML, JS, CSS, iconos).
 // NUNCA guarda datos de clientes: las peticiones a Firebase no pasan por esta cache.
 const VERSION = 'hu-__VERSION__';
-const CASCARA = ['./', './index.html', './app.js', './estilos.css', './manifest.webmanifest', './icono-192.png', './icono-512.png'];
+const CASCARA = ['./', './index.html', './app.js', './estilos.css', './manifest.webmanifest', './icono-v2-192.png', './icono-v2-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(CASCARA)).then(() => self.skipWaiting()));
