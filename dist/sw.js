@@ -1,7 +1,7 @@
 // Hondutel Ubica - service worker.
 // Solo guarda la "cascara" de la app (HTML, JS, CSS, iconos).
 // NUNCA guarda datos de clientes: las peticiones a Firebase no pasan por esta cache.
-const VERSION = 'hu-2.0.1';
+const VERSION = 'hu-3.0.0';
 const CASCARA = ['./', './index.html', './app.js', './estilos.css', './manifest.webmanifest', './icono-v2-192.png', './icono-v2-512.png'];
 
 self.addEventListener('install', (e) => {

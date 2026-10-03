@@ -4,17 +4,22 @@
 import QRCode from 'qrcode';
 import * as D from './datos.js';
 import {
-  obtenerLlaves, huella, cierreValido, abrirCliente,
+  obtenerLlaves, huella, cierreValido, abrirCliente, llaveBusqueda, buscarCliente, normalizarTelefono,
 } from './cripto.js';
 import {
-  APP_VERSION, DIVISOR_PUBLIC_KEY_B64, MINUTOS_OCULTA_PARA_BORRAR, PREFIJO_PAIS, MOTIVOS_NO_ENCONTRADO,
+  APP_VERSION, DIVISOR_PUBLIC_KEYS, MINUTOS_OCULTA_PARA_BORRAR, PREFIJO_PAIS, MOTIVOS_NO_ENCONTRADO,
+  GRACIA_MINUTOS_POR_DEFECTO,
 } from './config.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ms = (t) => (t == null ? null : typeof t === 'number' ? t : t.toMillis());
 const hora = (m) => new Date(m).toLocaleTimeString('es-HN', { hour: 'numeric', minute: '2-digit' });
-const divisorKey = () => globalThis.__HU_DIVISOR_KEY ?? DIVISOR_PUBLIC_KEY_B64;
+const divisorKeys = () => {
+  const k = globalThis.__HU_DIVISOR_KEY ?? DIVISOR_PUBLIC_KEYS;
+  return (Array.isArray(k) ? k : [k]).filter(Boolean);
+};
+const AREA = { mora: 'Cobranza (Mora)', reparacion: 'Reparación' };
 
 // ---------------- Estado (solo en memoria) ----------------
 const S = {
@@ -23,7 +28,9 @@ const S = {
   llaves: null,        // {privada, publicaB64}
   pestana: 'visitas',
   asignaciones: [],    // metadatos del servidor
-  vistas: new Map(),   // asigId -> {estado, cierre, clientes:[], error}
+  vistas: new Map(),   // asigId -> {estado, cierre, llave, resultados, abierto, error}
+  config: null,        // config/general (jornadas, minutos de gracia)
+  busqueda: '',
   desuscribir: null,
   ocultaDesde: null,
   aviso: null,
@@ -35,6 +42,7 @@ const ERRORES = {
   EXTENSION_NO_FIRMADA: 'La extensión de horario no trae una firma válida del Divisor; se respeta el horario original.',
   FIRMA_INVALIDA: 'Un paquete no tiene una firma válida del Divisor y fue rechazado.',
   FUERA_DE_HORARIO: 'Esta asignación está fuera de horario o fue revocada.',
+  NO_COINCIDE: 'Un paquete no corresponde a esta asignación y fue rechazado.',
 };
 
 function mensajeError(e) {
@@ -51,60 +59,96 @@ function avisar(texto, tipo = 'ok') {
 
 // ---------------- Borrado de datos ----------------
 function borrarDatosClientes() {
-  for (const v of S.vistas.values()) v.clientes = [];
+  for (const v of S.vistas.values()) { v.abierto = null; v.llave = null; }
   S.vistas.clear();
 }
 
-function esActiva(a, ahora = Date.now()) {
-  const v = S.vistas.get(a.id);
-  const cierre = v?.cierre ?? ms(a.finOriginal ?? a.fin);
-  return !a.revocada && ahora >= ms(a.inicio) && ahora < cierre;
-}
+const graciaMs = () => 60000 * (Number.isInteger(S.config?.graciaMinutos) ? S.config.graciaMinutos : GRACIA_MINUTOS_POR_DEFECTO);
 
 // ---------------- Carga de una asignacion ----------------
+// Ya NO se descargan los clientes: solo el resumen. Cada cliente se abre
+// uno por uno escribiendo su numero (y el servidor exige que sea uno a la vez).
 async function cargarAsignacion(a) {
-  const vista = { estado: 'cargando', clientes: [], cierre: ms(a.finOriginal ?? a.fin), error: null, finVisto: ms(a.fin) };
+  const vista = { estado: 'cargando', cierre: ms(a.finOriginal ?? a.fin), error: null, finVisto: ms(a.fin), resultados: [], abierto: null, llave: null };
   S.vistas.set(a.id, vista);
   render();
   try {
-    if (!divisorKey()) throw new Error('SIN_LLAVE_DIVISOR');
+    if (!divisorKeys().length) throw new Error('SIN_LLAVE_DIVISOR');
     if (!S.perfil?.llavePublica || S.perfil.llavePublica !== S.llaves.publicaB64) throw new Error('TELEFONO_NO_REGISTRADO');
-    vista.cierre = await cierreValido(a, divisorKey()).catch((e) => {
+    vista.cierre = await cierreValido(a, divisorKeys()).catch((e) => {
       if (e.message === 'EXTENSION_NO_FIRMADA') { vista.aviso = ERRORES.EXTENSION_NO_FIRMADA; return ms(a.finOriginal); }
       throw e;
     });
     if (Date.now() >= vista.cierre) { S.vistas.delete(a.id); render(); return; }
 
     await D.registrarConsulta(a, S.usuario.uid);
-    const res = await D.resultados(a.id);
-    const encontrados = new Set(res.filter((r) => r.resultado === 'encontrado').map((r) => r.cliente));
-    const fallidos = {};
-    for (const r of res.filter((x) => x.resultado === 'no_encontrado')) {
-      (fallidos[r.cliente] ||= []).push(r.motivo);
-    }
-
-    const clientes = [];
-    for (let i = 1; i <= a.cantidadClientes; i++) {
-      const id = 'c' + String(i).padStart(2, '0');
-      if (encontrados.has(id)) { clientes.push({ id, encontrado: true }); continue; }
-      try {
-        const p = await D.paquete(a.id, id);
-        if (!p) { clientes.push({ id, error: 'Sin datos' }); continue; }
-        const d = await abrirCliente(id, p, a, S.llaves.privada, divisorKey());
-        clientes.push({ id, datos: d, fallidos: fallidos[id] || [] });
-      } catch (e) {
-        if (D.esNegado(e)) clientes.push({ id, encontrado: true });
-        else clientes.push({ id, error: ERRORES[e.message] || 'No se pudo abrir' });
-      }
-    }
-    if (S.vistas.get(a.id) !== vista) return;   // se borro mientras cargaba
-    vista.clientes = clientes;
+    vista.llave = await llaveBusqueda(a, S.llaves.privada);
+    vista.resultados = await D.resultados(a.id);
+    // Si quedo un cliente abierto (por ejemplo, se cerro la app), se retoma ese.
+    const abierto = await D.clienteAbierto(a.id);
+    if (S.vistas.get(a.id) !== vista) return;
     vista.estado = 'lista';
+    if (abierto) await mostrarCliente(a, vista, abierto).catch((e) => { vista.abierto = { id: abierto, datos: null, error: ERRORES[e.message] || mensajeError(e) }; });
   } catch (e) {
     vista.estado = 'error';
     vista.error = mensajeError(e);
   }
   render();
+}
+
+async function mostrarCliente(a, vista, cliente) {
+  const p = await D.paquete(a.id, cliente);
+  if (!p) throw new Error('Sin datos');
+  const datos = await abrirCliente(cliente, p, a, S.llaves.privada, divisorKeys());
+  if (S.vistas.get(a.id) !== vista) return;
+  vista.abierto = { id: cliente, datos, gracia: null };
+}
+
+function contar(vista, a) {
+  const encontrados = new Set(vista.resultados.filter((r) => r.resultado === 'encontrado').map((r) => r.cliente));
+  return { encontrados: encontrados.size, pendientes: a.cantidadClientes - encontrados.size, set: encontrados };
+}
+
+function intentos(vista, cliente) {
+  return vista.resultados.filter((r) => r.resultado === 'no_encontrado' && r.cliente === cliente);
+}
+
+// ---------------- Buscar por numero ----------------
+async function buscar(texto) {
+  const tel = normalizarTelefono(texto);
+  if (!tel) { avisar('Escribe un número de 8 dígitos (por ejemplo 2785-1234).', 'error'); return; }
+  const ahora = Date.now();
+  const activas = S.asignaciones.filter((a) => S.vistas.get(a.id)?.estado === 'lista' && ahora < S.vistas.get(a.id).cierre);
+  const ocupada = activas.find((a) => S.vistas.get(a.id).abierto && !S.vistas.get(a.id).abierto.gracia);
+  for (const a of activas) {
+    const v = S.vistas.get(a.id);
+    const cli = await buscarCliente(a, v.llave, tel);
+    if (!cli) continue;
+    if (contar(v, a).set.has(cli)) { avisar('Ese cliente ya fue marcado como encontrado.', 'error'); return; }
+    if (v.abierto?.id === cli) { render(); return; }
+    if (ocupada) { avisar('Primero registra el resultado del cliente que tienes abierto.', 'error'); return; }
+    if (v.abierto?.gracia) { v.abierto = null; }
+    try {
+      await D.abrir(a, S.usuario.uid, cli);
+    } catch (e) {
+      avisar(D.esNegado(e) ? 'El servidor no permitió abrirlo (fuera de horario, revocado u otro cliente abierto).'
+        : 'No se pudo abrir. Revisa tu conexión.', 'error');
+      render();
+      return;
+    }
+    S.busqueda = '';
+    try {
+      await mostrarCliente(a, v, cli);
+    } catch (e) {
+      // Quedo abierto en el servidor pero no se pudo mostrar: se ofrece cerrarlo.
+      v.abierto = { id: cli, datos: null, error: ERRORES[e.message] || mensajeError(e) };
+      avisar(D.esNegado(e) ? 'El servidor no permitió abrirlo (fuera de horario, revocado u otro cliente abierto).'
+        : (ERRORES[e.message] || 'No se pudo abrir. Revisa tu conexión.'), 'error');
+    }
+    render();
+    return;
+  }
+  avisar('Ese número no está entre tus clientes autorizados en este momento.', 'error');
 }
 
 function sincronizar() {
@@ -114,9 +158,13 @@ function sincronizar() {
   for (const [id, v] of S.vistas) {
     const a = porId.get(id);
     if (!a || a.revocada || ahora >= v.cierre || (v.finVisto !== ms(a.fin) && v.estado !== 'cargando')) {
-      v.clientes = [];
+      v.abierto = null; v.llave = null;
       S.vistas.delete(id);
     }
+  }
+  // Fin del tiempo de gracia: la ficha se borra sola.
+  for (const v of S.vistas.values()) {
+    if (v.abierto?.gracia && ahora >= v.abierto.gracia) v.abierto = null;
   }
   // Cargar las que estan en horario.
   for (const a of S.asignaciones) {
@@ -136,6 +184,8 @@ async function alCambiarSesion(u) {
   S.asignaciones = [];
   S.errorPerfil = null;
   S.errorEscucha = null;
+  S.config = null;
+  S.busqueda = '';
   S.pestana = 'visitas';
   if (!u) { render(); return; }
   render();
@@ -146,6 +196,7 @@ async function alCambiarSesion(u) {
     S.errorPerfil = D.esNegado(e) ? 'El servidor no permite leer tu perfil.' : 'No se pudo leer tu perfil (sin conexión).';
   }
   if (S.perfil?.rol === 'tecnico' && S.perfil.activo) {
+    S.config = await D.configuracion().catch(() => null);
     S.desuscribir = D.escucharAsignaciones(u.uid,
       (lista) => { S.asignaciones = lista; sincronizar(); },
       (e) => {
@@ -168,18 +219,26 @@ function obtenerGPS() {
   });
 }
 
-async function confirmarEncontrado(asigId, cli) {
+function clienteAbiertoDe(asigId) {
+  const v = S.vistas.get(asigId);
+  return v?.abierto && (v.abierto.datos || v.abierto.error) && !v.abierto.gracia ? v : null;
+}
+
+async function confirmarEncontrado(asigId) {
   const a = S.asignaciones.find((x) => x.id === asigId);
-  const c = S.vistas.get(asigId)?.clientes.find((x) => x.id === cli);
-  if (!a || !c?.datos) return;
+  const v = clienteAbiertoDe(asigId);
+  if (!a || !v || !v.abierto.datos) return;
+  const { id: cli, datos } = v.abierto;
+  const min = Math.round(graciaMs() / 60000);
   abrirModal(`
-    <h2>¿Cliente encontrado?</h2>
-    <p><b>${esc(c.datos.nombre)}</b></p>
-    <p class="nota">Al confirmar, la dirección de este cliente <b>desaparece de inmediato</b> y no se puede deshacer.</p>
+    <h2>¿Confirmas que encontraste a este cliente?</h2>
+    <p class="confirmar"><b>${esc(datos.nombre) || 'Sin nombre'}</b><br>${esc(datos.telefono)}</p>
+    <p class="nota">${min ? `La ficha seguirá visible <b>${min} minuto(s)</b> por si necesitas llamar; después se borra sola.`
+    : 'La ficha se borra de inmediato.'} No se puede deshacer.</p>
     <label class="check"><input type="checkbox" id="m-gps" checked> Registrar mi ubicación GPS como constancia</label>
     <div class="fila-botones">
-      <button class="sec" data-accion="cerrar-modal">Cancelar</button>
-      <button class="pri" id="m-ok">Sí, encontrado</button>
+      <button class="sec" data-accion="cerrar-modal">No, volver</button>
+      <button class="pri" id="m-ok">Sí, cliente encontrado</button>
     </div>`);
   $('#m-ok').onclick = async () => {
     const b = $('#m-ok'); b.disabled = true; b.textContent = 'Guardando…';
@@ -187,9 +246,11 @@ async function confirmarEncontrado(asigId, cli) {
     const gps = quiereGps ? await obtenerGPS() : null;
     try {
       await D.marcarEncontrado(a, S.usuario.uid, cli, gps);
-      c.datos = null; c.encontrado = true;
+      v.resultados.push({ resultado: 'encontrado', cliente: cli });
+      if (graciaMs() > 0) v.abierto.gracia = Date.now() + graciaMs();
+      else v.abierto = null;
       cerrarModal();
-      avisar(quiereGps && !gps ? 'Cliente marcado como encontrado (no se pudo obtener el GPS).' : 'Cliente marcado como encontrado.');
+      avisar(quiereGps && !gps ? 'Cliente encontrado (no se pudo obtener el GPS).' : 'Cliente encontrado. Ya puedes buscar el siguiente.');
     } catch (e) {
       cerrarModal();
       avisar(D.esNegado(e) ? 'El servidor lo rechazó: la asignación ya no está vigente.' : 'No se pudo guardar. Revisa tu conexión.', 'error');
@@ -198,18 +259,20 @@ async function confirmarEncontrado(asigId, cli) {
   };
 }
 
-async function confirmarNoEncontrado(asigId, cli) {
+async function confirmarNoEncontrado(asigId) {
   const a = S.asignaciones.find((x) => x.id === asigId);
-  const c = S.vistas.get(asigId)?.clientes.find((x) => x.id === cli);
-  if (!a || !c?.datos) return;
+  const v = clienteAbiertoDe(asigId);
+  if (!a || !v) return;
+  const { id: cli } = v.abierto;
+  const datos = v.abierto.datos || { nombre: 'Cliente con datos dañados', telefono: '' };
   abrirModal(`
     <h2>No encontrado</h2>
-    <p><b>${esc(c.datos.nombre)}</b></p>
+    <p><b>${esc(datos.nombre) || esc(datos.telefono)}</b></p>
     <label>Motivo
-      <select id="m-motivo">${MOTIVOS_NO_ENCONTRADO.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>
+      <select id="m-motivo">${MOTIVOS_NO_ENCONTRADO.map(([val, txt]) => `<option value="${val}">${txt}</option>`).join('')}</select>
     </label>
     <label>Detalle (opcional)<textarea id="m-detalle" maxlength="300" rows="3" placeholder="Ej.: regresar después de las 2"></textarea></label>
-    <p class="nota">La dirección seguirá visible para que puedas intentarlo de nuevo hoy.</p>
+    <p class="nota">La ficha se cierra para que puedas buscar el siguiente. Este cliente sigue pendiente: lo puedes volver a buscar hoy.</p>
     <div class="fila-botones">
       <button class="sec" data-accion="cerrar-modal">Cancelar</button>
       <button class="pri" id="m-ok">Guardar</button>
@@ -219,9 +282,10 @@ async function confirmarNoEncontrado(asigId, cli) {
     $('#m-ok').disabled = true;
     try {
       await D.marcarNoEncontrado(a, S.usuario.uid, cli, motivo, detalle);
-      c.fallidos = [...(c.fallidos || []), motivo];
+      v.resultados.push({ resultado: 'no_encontrado', cliente: cli, motivo });
+      v.abierto = null;
       cerrarModal();
-      avisar('Intento registrado.');
+      avisar('Intento registrado. Ya puedes buscar el siguiente.');
     } catch (e) {
       cerrarModal();
       avisar(D.esNegado(e) ? 'El servidor lo rechazó: la asignación ya no está vigente.' : 'No se pudo guardar. Revisa tu conexión.', 'error');
@@ -292,32 +356,43 @@ function enlaces(d) {
     </div>`;
 }
 
-function tarjetaCliente(asigId, c) {
-  if (c.encontrado) {
-    return `<li class="cliente hecho" data-cli="${c.id}"><span class="marca">✓</span> Cliente encontrado — dirección retirada</li>`;
-  }
-  if (c.error) return `<li class="cliente error" data-cli="${c.id}">${esc(c.error)}</li>`;
-  const d = c.datos;
+function fichaError(a, v) {
+  return `
+  <div class="cliente abierto" data-cli="${v.abierto.id}">
+    <p class="error">${esc(v.abierto.error)}</p>
+    <p class="nota">Para seguir con el siguiente cliente, cierra este registrándolo como no atendido y avisa al autorizador.</p>
+    <div class="resultado"><button class="sec" data-accion="no-encontrado" data-asig="${a.id}">Cerrar este cliente</button></div>
+  </div>`;
+}
+
+function fichaCliente(a, v) {
+  if (!v.abierto.datos) return fichaError(a, v);
+  const c = v.abierto, d = c.datos;
   const geo = d.lat != null && d.lon != null;
   const motivos = Object.fromEntries(MOTIVOS_NO_ENCONTRADO);
+  const previos = intentos(v, c.id);
+  const tec = d.tecnico || null;
+  const restante = c.gracia ? Math.max(0, c.gracia - Date.now()) : 0;
   return `
-  <li class="cliente" data-cli="${c.id}">
+  <div class="cliente abierto${c.gracia ? ' gracia' : ''}" data-cli="${c.id}">
+    ${c.gracia ? `<p class="aviso-gracia">✓ Cliente encontrado. Esta ficha se borrará en <b id="cuenta">${Math.floor(restante / 60000)}:${String(Math.floor((restante % 60000) / 1000)).padStart(2, '0')}</b></p>` : ''}
     <div class="cab">
       <span class="tipo ${d.tipo === 'Mora' ? 'mora' : 'rep'}">${d.tipo === 'Mora' ? 'Mora' : d.tipo === 'Reparacion' ? 'Reparación' : esc(d.tipo)}</span>
-      <h3>${esc(d.nombre)}</h3>
+      <h3>${esc(d.nombre) || 'Sin nombre'}</h3>
     </div>
     <dl>
       <dt>Teléfono</dt><dd>${esc(d.telefono) || '—'}</dd>
       <dt>Contacto</dt><dd>${esc(d.contacto) || '—'}</dd>
       <dt>Ubicación</dt><dd>${geo ? `${Number(d.lat).toFixed(5)}, ${Number(d.lon).toFixed(5)}` : '<span class="alerta">Sin ubicación registrada</span>'}</dd>
+      ${tec ? `${tec.armario ? `<dt>Armario</dt><dd>${esc(tec.armario)}</dd>` : ''}${tec.caja_terminal ? `<dt>Caja terminal</dt><dd>${esc(tec.caja_terminal)}</dd>` : ''}${tec.par_primario || tec.par_secundario ? `<dt>Pares</dt><dd>${esc(tec.par_primario || '—')} / ${esc(tec.par_secundario || '—')}</dd>` : ''}` : ''}
     </dl>
-    ${c.fallidos?.length ? `<p class="intentos">Intentos sin éxito: ${c.fallidos.length} (último: ${esc(motivos[c.fallidos.at(-1)] || c.fallidos.at(-1))})</p>` : ''}
+    ${previos.length ? `<p class="intentos">Intentos sin éxito hoy: ${previos.length} (último: ${esc(motivos[previos.at(-1).motivo] || previos.at(-1).motivo)})</p>` : ''}
     ${enlaces(d)}
-    <div class="resultado">
-      <button class="pri" data-accion="encontrado" data-asig="${asigId}" data-cli="${c.id}">Cliente encontrado</button>
-      <button class="sec" data-accion="no-encontrado" data-asig="${asigId}" data-cli="${c.id}">No encontrado</button>
-    </div>
-  </li>`;
+    ${c.gracia ? '' : `<div class="resultado">
+      <button class="pri" data-accion="encontrado" data-asig="${a.id}">Cliente encontrado</button>
+      <button class="sec" data-accion="no-encontrado" data-asig="${a.id}">No encontrado</button>
+    </div>`}
+  </div>`;
 }
 
 function vistaVisitas() {
@@ -341,25 +416,39 @@ function vistaVisitas() {
   if (!activas.length) {
     return `<section class="tarjeta vacio">
       <h2>No tienes clientes autorizados en este momento</h2>
-      ${proximas.length ? `<p>Próxima asignación: <b>${new Date(ms(proximas[0].inicio)).toLocaleDateString('es-HN', { weekday: 'long', day: 'numeric', month: 'long' })}</b>, de ${hora(ms(proximas[0].inicio))} a ${hora(ms(proximas[0].fin))}.</p>` : '<p>Cuando el autorizador te asigne visitas, aparecerán aquí en su horario.</p>'}
+      ${proximas.length ? `<p>Próxima asignación: <b>${new Date(ms(proximas[0].inicio)).toLocaleDateString('es-HN', { weekday: 'long', day: 'numeric', month: 'long' })}</b>, de ${hora(ms(proximas[0].inicio))} a ${hora(ms(proximas[0].fin))}${proximas[0].cantidadClientes ? ` · ${proximas[0].cantidadClientes} cliente(s)` : ''}.</p>` : '<p>Cuando el autorizador te asigne visitas, aparecerán aquí en su horario.</p>'}
     </section>`;
   }
 
-  return activas.map((a) => {
+  const listas = activas.filter((a) => S.vistas.get(a.id).estado === 'lista');
+  const ocupada = listas.some((a) => clienteAbiertoDe(a.id));
+  const buscador = listas.length ? `
+    <section class="tarjeta buscador">
+      <form id="f-buscar">
+        <label>Escribe el número telefónico del cliente
+          <input id="b-tel" inputmode="numeric" autocomplete="off" maxlength="14" placeholder="2785-1234" value="${esc(S.busqueda)}" ${ocupada ? 'disabled' : ''}>
+        </label>
+        <button class="pri ancho" type="submit" ${ocupada ? 'disabled' : ''}>Buscar</button>
+      </form>
+      ${ocupada ? '<p class="nota">Registra el resultado del cliente abierto para buscar el siguiente.</p>' : '<p class="nota">Se muestra un cliente a la vez. Cada búsqueda queda registrada.</p>'}
+    </section>` : '';
+
+  return buscador + activas.map((a) => {
     const v = S.vistas.get(a.id);
     const restan = Math.max(0, v.cierre - ahora);
     const h = Math.floor(restan / 3600000), m = Math.floor((restan % 3600000) / 60000);
-    const pendientes = v.clientes.filter((c) => c.datos).length;
+    const n = contar(v, a);
     return `
     <section class="tarjeta asig" data-asig="${a.id}">
       <div class="reloj">
-        <div><b>${esc(a.municipio)}</b> · ${v.clientes.length ? `${pendientes} pendiente(s) de ${a.cantidadClientes}` : `${a.cantidadClientes} cliente(s)`}</div>
+        <div><b>${esc(a.municipio)}</b>${a.area ? ` · ${AREA[a.area] || esc(a.area)}` : ''}</div>
+        <div class="conteo">${a.cantidadClientes} cliente(s) · <b>${n.encontrados}</b> encontrado(s) · <b>${n.pendientes}</b> pendiente(s)</div>
         <div class="cierre">Se cierra a las <b>${hora(v.cierre)}</b> (${h ? h + ' h ' : ''}${m} min)${a.extensiones ? ' · extendida' : ''}</div>
       </div>
       ${v.aviso ? `<p class="alerta">${esc(v.aviso)}</p>` : ''}
-      ${v.estado === 'cargando' ? '<p>Abriendo tus visitas…</p>' : ''}
+      ${v.estado === 'cargando' ? '<p>Preparando tus visitas…</p>' : ''}
       ${v.estado === 'error' ? `<p class="error">${esc(v.error)}</p><button class="sec" data-accion="reintentar" data-asig="${a.id}">Reintentar</button>` : ''}
-      ${v.estado === 'lista' ? `<ul class="clientes">${v.clientes.map((c) => tarjetaCliente(a.id, c)).join('')}</ul>` : ''}
+      ${v.estado === 'lista' && (v.abierto?.datos || v.abierto?.error) ? fichaCliente(a, v) : ''}
     </section>`;
   }).join('');
 }
@@ -382,7 +471,7 @@ function vistaDiagnostico() {
       fila(reg, 'Este teléfono está registrado', reg ? 'Sí, el código coincide' : (p.llavePublica ? 'No: tu usuario tiene registrado OTRO teléfono' : 'No: falta registrar el código de este teléfono'));
     }
   }
-  fila(!!divisorKey(), 'Llave del Divisor', divisorKey() ? 'Configurada' : 'Pendiente (fase 4). Sin ella la app no muestra clientes.');
+  fila(divisorKeys().length > 0, 'Llave del Divisor', divisorKeys().length ? `Configurada (${divisorKeys().length})` : 'Pendiente. Sin ella la app no muestra clientes.');
   fila(null, 'Huella de este teléfono', `<span id="d-huella">…</span>`);
   fila(null, 'Hora del teléfono', new Date().toLocaleString('es-HN'));
   fila(null, 'Versión de la app', APP_VERSION);
@@ -392,6 +481,7 @@ function vistaDiagnostico() {
 
 function render() {
   const raiz = $('#app');
+  const foco = document.activeElement?.id;
   const enSesion = !!S.usuario;
   $('#pestanas').hidden = !enSesion;
   $('#salir').hidden = !enSesion;
@@ -413,6 +503,13 @@ function render() {
   if (h && S.llaves) huella(S.llaves.publicaB64).then((x) => { h.textContent = x; });
   const f = $('#f-login');
   if (f) f.onsubmit = entrarFormulario;
+  const fb = $('#f-buscar');
+  if (fb) {
+    const inp = $('#b-tel');
+    if (foco === 'b-tel' && !inp.disabled) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    inp.oninput = () => { S.busqueda = inp.value; };
+    fb.onsubmit = (ev) => { ev.preventDefault(); const tx = inp.value; fb.querySelector('button').disabled = true; buscar(tx); };
+  }
 }
 
 async function entrarFormulario(ev) {
@@ -438,8 +535,8 @@ document.addEventListener('click', async (ev) => {
   if (!t) return;
   if (t.dataset.pestana) { S.pestana = t.dataset.pestana; render(); return; }
   const acc = t.dataset.accion;
-  if (acc === 'encontrado') confirmarEncontrado(t.dataset.asig, t.dataset.cli);
-  else if (acc === 'no-encontrado') confirmarNoEncontrado(t.dataset.asig, t.dataset.cli);
+  if (acc === 'encontrado') confirmarEncontrado(t.dataset.asig);
+  else if (acc === 'no-encontrado') confirmarNoEncontrado(t.dataset.asig);
   else if (acc === 'cerrar-modal') cerrarModal();
   else if (acc === 'reintentar') { S.vistas.delete(t.dataset.asig); sincronizar(); }
   else if (acc === 'copiar-codigo') {
@@ -464,6 +561,17 @@ document.addEventListener('visibilitychange', () => {
 
 // Reloj: actualiza el contador, borra al cierre y abre las que entran en horario.
 setInterval(() => { if (S.usuario) sincronizar(); }, 15000);
+
+// Cuenta regresiva del tiempo de gracia (cada segundo, sin redibujar todo).
+setInterval(() => {
+  for (const v of S.vistas.values()) {
+    if (!v.abierto?.gracia) continue;
+    const r = v.abierto.gracia - Date.now();
+    if (r <= 0) { v.abierto = null; render(); return; }
+    const el = $('#cuenta');
+    if (el) el.textContent = `${Math.floor(r / 60000)}:${String(Math.floor((r % 60000) / 1000)).padStart(2, '0')}`;
+  }
+}, 1000);
 
 // ---------------- Arranque ----------------
 (async () => {

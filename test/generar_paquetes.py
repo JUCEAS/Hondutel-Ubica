@@ -1,22 +1,21 @@
-"""Genera, con el MISMO codigo del Divisor (cifrado_divisor.py), los paquetes
-cifrados y firmados que usa la prueba de la app. Entrada y salida en JSON por stdin/stdout."""
-import base64, json, sys
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cifrado_divisor import crear_paquetes, firmar_extension, b64
+"""Genera, con el MISMO codigo del Divisor (ubica_cripto.py de la v48), los
+paquetes cifrados y firmados, el indice ciego y las extensiones que usa la
+prueba de la app. Entrada y salida en JSON por stdin/stdout."""
+import json, os, sys
+sys.path.insert(0, os.environ.get("DIVISOR_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "divisor_v48")))
+import ubica_cripto as uc
 
 e = json.load(sys.stdin)
-pub_tec = serialization.load_der_public_key(base64.b64decode(e["tecnicoPublica"]))
-priv_div = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-otro_div = rsa.generate_private_key(public_exponent=65537, key_size=2048)   # falsificador
-salida = {"divisorPublica": b64(priv_div.public_key().public_bytes(
-    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)), "asignaciones": {}}
+priv_div = uc.nueva_llave_firma()
+otro_div = uc.nueva_llave_firma()   # falsificador
+salida = {"divisorPublica": uc.publica_b64(priv_div), "asignaciones": {}}
 for a in e["asignaciones"]:
-    paq = crear_paquetes(a["clientes"], a["id"], a["tecnicoUid"], a["inicio"], a["fin"], pub_tec, priv_div)
-    r = {"paquetes": paq, "extensiones": {}}
+    extra, paq = uc.armar_asignacion(a["clientes"], a["id"], a["tecnicoUid"], e["tecnicoPublica"],
+                                     a["inicio"], a["fin"], a.get("area", "mora"), priv_div)
+    r = {"paquetes": paq, "indice": extra["indice"], "llaveBusqueda": extra["llaveBusqueda"], "extensiones": {}}
     for x in a.get("extensiones", []):
         llave = otro_div if x.get("falsa") else priv_div
         r["extensiones"][x["nombre"]] = {"fin": x["fin"], "numero": x["numero"],
-            "firma": firmar_extension(a["id"], a["tecnicoUid"], a["inicio"], x["fin"], x["numero"], llave)}
+            "firma": uc.firmar_extension(a["id"], a["tecnicoUid"], a["inicio"], x["fin"], x["numero"], llave)}
     salida["asignaciones"][a["id"]] = r
 json.dump(salida, sys.stdout, ensure_ascii=False)

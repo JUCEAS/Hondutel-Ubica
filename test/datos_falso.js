@@ -8,8 +8,8 @@
 const negado = () => Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
 
 const S = {
-  cuentas: {}, usuarios: {}, asignaciones: {}, paquetes: {}, resultados: {}, bitacora: [],
-  sesion: null, authCbs: [], escuchas: [], registro: [],
+  cuentas: {}, usuarios: {}, asignaciones: {}, paquetes: {}, resultados: {}, bitacora: [], estado: {},
+  config: null, sesion: null, authCbs: [], escuchas: [], registro: [],
 };
 
 export const esNegado = (e) => e && e.code === 'permission-denied';
@@ -63,12 +63,38 @@ export async function resultados(asigId) {
 }
 
 const encontrado = (asigId, cli) => (S.resultados[asigId] || []).some((r) => r.resultado === 'encontrado' && r.cliente === cli);
+const abiertoEn = (asigId) => S.estado[asigId]?.cliente || '';
+const clienteValido = (cli, n) => /^c(0[1-9]|1[0-9]|20)$/.test(cli) && Number(cli.slice(1)) <= n;
+
+export async function configuracion() {
+  if (!S.sesion || !esTecnicoActivo(S.sesion.uid)) throw negado();
+  return S.config ? structuredClone(S.config) : null;
+}
+
+export async function clienteAbierto(asigId) {
+  const a = S.asignaciones[asigId];
+  if (!S.sesion || a?.tecnicoUid !== S.sesion.uid) throw negado();
+  return abiertoEn(asigId);
+}
+
+// Misma logica que estadoValido() + consultaValida('apertura') de firestore.rules.
+export async function abrir(a, uid, cli) {
+  const srv = S.asignaciones[a.id];
+  if (!esTecnicoActivo(uid) || !vigente(srv, uid) || !clienteValido(cli, srv.cantidadClientes)
+      || abiertoEn(a.id) !== '' || encontrado(a.id, cli) || a.autorizadorUid !== srv.autorizadorUid) {
+    log('abrir-negado', `${a.id}/${cli}`);
+    throw negado();
+  }
+  S.bitacora.push({ tipo: 'apertura', asignacionId: a.id, tecnicoUid: uid, cliente: cli, momento: Date.now() });
+  S.estado[a.id] = { cliente: cli, tecnicoUid: uid, momento: Date.now() };
+  log('abrir', `${a.id}/${cli}`);
+}
 
 export async function paquete(asigId, cli) {
   const uid = S.sesion?.uid;
   const a = S.asignaciones[asigId];
   const conBitacora = S.bitacora.some((b) => b.asignacionId === asigId && b.tecnicoUid === uid);
-  if (!esTecnicoActivo(uid) || !vigente(a, uid) || !conBitacora || encontrado(asigId, cli)) {
+  if (!esTecnicoActivo(uid) || !vigente(a, uid) || !conBitacora || abiertoEn(asigId) !== cli || encontrado(asigId, cli)) {
     log('paquete-negado', `${asigId}/${cli}`);
     throw negado();
   }
@@ -79,13 +105,15 @@ export async function paquete(asigId, cli) {
 function validarResultado(a, uid, cli) {
   const srv = S.asignaciones[a.id];
   if (!esTecnicoActivo(uid) || !vigente(srv, uid)) throw negado();
-  if (!/^c(0[1-9]|1[0-9]|20)$/.test(cli) || Number(cli.slice(1)) > srv.cantidadClientes) throw negado();
+  if (!clienteValido(cli, srv.cantidadClientes)) throw negado();
+  if (abiertoEn(a.id) !== cli) throw negado();   // solo el cliente abierto
 }
 
 export async function marcarEncontrado(a, uid, cli, gps) {
   validarResultado(a, uid, cli);
   if (encontrado(a.id, cli)) throw negado();
   (S.resultados[a.id] ||= []).push({ resultado: 'encontrado', cliente: cli, tecnicoUid: uid, momento: Date.now(), ...(gps || {}) });
+  S.estado[a.id] = { cliente: '', tecnicoUid: uid, liberadoPor: cli };
   log('encontrado', `${a.id}/${cli}`);
 }
 
@@ -93,6 +121,7 @@ export async function marcarNoEncontrado(a, uid, cli, motivo, detalle) {
   validarResultado(a, uid, cli);
   if (encontrado(a.id, cli)) throw negado();
   (S.resultados[a.id] ||= []).push({ resultado: 'no_encontrado', cliente: cli, motivo, detalle, tecnicoUid: uid, momento: Date.now() });
+  S.estado[a.id] = { cliente: '', tecnicoUid: uid, liberadoPor: `${cli}_ne` };
   log('no_encontrado', `${a.id}/${cli}`);
 }
 
@@ -106,4 +135,5 @@ globalThis.__HU_FAKE = {
   desactivar(uid) { S.usuarios[uid].activo = false; emitir(); },
   emitir,
   leerPaquete: (a, c) => paquete(a, c),
+  abrirDirecto: (a, c) => abrir(S.asignaciones[a] && { id: a, ...S.asignaciones[a] }, S.sesion.uid, c),
 };

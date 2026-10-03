@@ -64,21 +64,24 @@ export async function huella(publicaB64) {
   return [...h.slice(0, 6)].map((x) => x.toString(16).padStart(2, '0').toUpperCase()).join('-');
 }
 
-let cacheDivisor = null;
+const cacheDivisor = new Map();
 async function llaveDivisor(b64) {
-  if (!b64) throw new Error('SIN_LLAVE_DIVISOR');
-  if (!cacheDivisor || cacheDivisor.b64 !== b64) {
-    cacheDivisor = {
-      b64,
-      key: await subtle.importKey('spki', b64aBytes(b64), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']),
-    };
+  if (!cacheDivisor.has(b64)) {
+    cacheDivisor.set(b64, await subtle.importKey('spki', b64aBytes(b64), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']));
   }
-  return cacheDivisor.key;
+  return cacheDivisor.get(b64);
 }
 
-async function verificar(divisorB64, firmaB64, texto) {
-  const pub = await llaveDivisor(divisorB64);
-  return subtle.verify({ name: 'RSA-PSS', saltLength: 32 }, pub, b64aBytes(firmaB64), enc.encode(texto));
+/** Acepta la firma si coincide con ALGUNA de las llaves del Divisor autorizadas. */
+async function verificar(llavesDivisor, firmaB64, texto) {
+  const lista = (Array.isArray(llavesDivisor) ? llavesDivisor : [llavesDivisor]).filter(Boolean);
+  if (!lista.length) throw new Error('SIN_LLAVE_DIVISOR');
+  for (const b64 of lista) {
+    try {
+      if (await subtle.verify({ name: 'RSA-PSS', saltLength: 32 }, await llaveDivisor(b64), b64aBytes(firmaB64), enc.encode(texto))) return true;
+    } catch { /* llave o firma con formato invalido: se prueba la siguiente */ }
+  }
+  return false;
 }
 
 const ms = (t) => (typeof t === 'number' ? t : t.toMillis());
@@ -87,21 +90,48 @@ const ms = (t) => (typeof t === 'number' ? t : t.toMillis());
  * Hora de cierre que la app acepta para una asignacion:
  * la original, o una extension FIRMADA por el Divisor.
  */
-export async function cierreValido(asig, divisorB64) {
+export async function cierreValido(asig, llavesDivisor) {
   const fin = ms(asig.fin), finOriginal = ms(asig.finOriginal), inicio = ms(asig.inicio);
   if (fin === finOriginal) return fin;
   if (fin < finOriginal) throw new Error('CIERRE_INVALIDO');
   const texto = `HU1-EXT|${asig.id}|${asig.tecnicoUid}|${inicio}|${fin}|${asig.extensiones}`;
-  if (!asig.firmaExtension || !(await verificar(divisorB64, asig.firmaExtension, texto))) {
+  if (!asig.firmaExtension || !(await verificar(llavesDivisor, asig.firmaExtension, texto))) {
     throw new Error('EXTENSION_NO_FIRMADA');
   }
   return fin;
 }
 
+// ---------------- Buscador (indice ciego) ----------------
+/** 8 digitos de Honduras, o '' si no es un numero valido. */
+export function normalizarTelefono(texto) {
+  let d = String(texto ?? '').replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('504')) d = d.slice(3);
+  return /^[2-9]\d{7}$/.test(d) ? d : '';
+}
+
+/** Abre la llave de busqueda de la asignacion (solo este telefono puede). */
+export async function llaveBusqueda(asig, privada) {
+  const cruda = await subtle.decrypt({ name: 'RSA-OAEP' }, privada, b64aBytes(asig.llaveBusqueda));
+  return subtle.importKey('raw', cruda, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+
+/** Indice del numero (mismo calculo que el Divisor): HMAC-SHA256(...)[:16] en hex. */
+export async function indiceTelefono(llaveHmac, telefono8) {
+  const firma = new Uint8Array(await subtle.sign('HMAC', llaveHmac, enc.encode(`HU-TEL|${telefono8}`)));
+  return [...firma.slice(0, 16)].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+/** Busca el numero en el indice de la asignacion: devuelve 'cNN' o null. */
+export async function buscarCliente(asig, llaveHmac, telefono8) {
+  const idx = await indiceTelefono(llaveHmac, telefono8);
+  return Object.keys(asig.indice || {}).find((c) => asig.indice[c] === idx) || null;
+}
+
 /** Verifica la firma del Divisor y descifra el paquete de UN cliente. */
-export async function abrirCliente(cliente, paquete, asig, privada, divisorB64) {
-  const texto = `HU1|${asig.id}|${asig.tecnicoUid}|${cliente}|${ms(asig.inicio)}|${ms(asig.finOriginal)}|${paquete.cifrado}`;
-  if (!(await verificar(divisorB64, paquete.firma, texto))) throw new Error('FIRMA_INVALIDA');
+export async function abrirCliente(cliente, paquete, asig, privada, llavesDivisor) {
+  const idx = (asig.indice || {})[cliente] || '';
+  const texto = `HU2|${asig.id}|${asig.tecnicoUid}|${cliente}|${ms(asig.inicio)}|${ms(asig.finOriginal)}|${asig.area}|${idx}|${paquete.cifrado}`;
+  if (!(await verificar(llavesDivisor, paquete.firma, texto))) throw new Error('FIRMA_INVALIDA');
   const sobre = JSON.parse(dec.decode(b64aBytes(paquete.cifrado)));
   const cruda = await subtle.decrypt({ name: 'RSA-OAEP' }, privada, b64aBytes(sobre.k));
   const aes = await subtle.importKey('raw', cruda, 'AES-GCM', false, ['decrypt']);

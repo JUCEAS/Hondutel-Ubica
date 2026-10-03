@@ -80,3 +80,11 @@ dt { color: var(--suave); } dd { margin: 0; word-break: break-word; }
   .cliente.hecho { background: #12301f; border-color: #1d5a35; color: #7fd6a0; }
   #modal-caja { background: #18222d; }
 }
+
+/* v3: buscador uno a la vez */
+.buscador input{font-size:1.4rem;letter-spacing:.06em;text-align:center}
+.conteo{font-size:.9rem;color:#334}
+.cliente.abierto{list-style:none;border:2px solid #F47B20;border-radius:12px;padding:12px;margin-top:10px;background:#fff}
+.cliente.gracia{border-color:#1d7a46}
+.aviso-gracia{background:#e7f6ec;color:#1d5c37;border-radius:8px;padding:8px 10px;margin:0 0 8px}
+.confirmar{font-size:1.15rem;line-height:1.5}

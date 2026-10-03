@@ -8,7 +8,7 @@ import {
 } from 'firebase/auth';
 import {
   initializeFirestore, memoryLocalCache, doc, getDoc, setDoc, collection, query, where,
-  onSnapshot, getDocs, serverTimestamp,
+  onSnapshot, getDocs, serverTimestamp, writeBatch,
 } from 'firebase/firestore';
 import { firebaseConfig } from './config.js';
 
@@ -71,6 +71,40 @@ export async function paquete(asigId, cliente) {
   return s.exists() ? s.data() : null;
 }
 
+/** Configuracion general (jornadas, minutos de gracia). null si no se puede leer. */
+export async function configuracion() {
+  try {
+    const s = await getDoc(doc(db, 'config', 'general'));
+    return s.exists() ? s.data() : null;
+  } catch (e) {
+    if (esNegado(e)) return null;
+    throw e;
+  }
+}
+
+/** Cliente abierto ahora en esa asignacion ('' = ninguno). */
+export async function clienteAbierto(asigId) {
+  const s = await getDoc(doc(db, 'asignaciones', asigId, 'estado', 'actual'));
+  return s.exists() ? (s.data().cliente || '') : '';
+}
+
+/**
+ * Abre UN cliente: deja la apertura en bitacora y lo marca como "el abierto".
+ * El servidor lo rechaza si ya hay otro abierto (uno a la vez).
+ */
+export async function abrir(asig, uid, cliente) {
+  const registro = `${asig.id}_${uid}_${cliente}_${Date.now()}`;
+  const b = writeBatch(db);
+  b.set(doc(db, 'bitacora', registro), {
+    tipo: 'apertura', asignacionId: asig.id, tecnicoUid: uid, autorizadorUid: asig.autorizadorUid,
+    cliente, momento: serverTimestamp(),
+  });
+  b.set(doc(db, 'asignaciones', asig.id, 'estado', 'actual'), {
+    cliente, tecnicoUid: uid, momento: serverTimestamp(), registro,
+  });
+  await b.commit();
+}
+
 function base(asig, uid, cliente, gps) {
   const d = {
     cliente, tecnicoUid: uid, autorizadorUid: asig.autorizadorUid, momento: serverTimestamp(),
@@ -79,13 +113,27 @@ function base(asig, uid, cliente, gps) {
   return d;
 }
 
-export async function marcarEncontrado(asig, uid, cliente, gps) {
-  await setDoc(doc(db, 'asignaciones', asig.id, 'resultados', cliente),
-    { resultado: 'encontrado', ...base(asig, uid, cliente, gps) });
+function liberar(b, asig, uid, liberadoPor) {
+  b.set(doc(db, 'asignaciones', asig.id, 'estado', 'actual'), {
+    cliente: '', tecnicoUid: uid, momento: serverTimestamp(), liberadoPor,
+  });
 }
 
+/** Registra "encontrado" y libera al tecnico para buscar el siguiente (una sola operacion). */
+export async function marcarEncontrado(asig, uid, cliente, gps) {
+  const b = writeBatch(db);
+  b.set(doc(db, 'asignaciones', asig.id, 'resultados', cliente), { resultado: 'encontrado', ...base(asig, uid, cliente, gps) });
+  liberar(b, asig, uid, cliente);
+  await b.commit();
+}
+
+/** Registra "no encontrado" (con motivo) y libera al tecnico; el cliente sigue pendiente. */
 export async function marcarNoEncontrado(asig, uid, cliente, motivo, detalle) {
+  const id = `${cliente}_ne_${Date.now()}`;
   const d = { resultado: 'no_encontrado', motivo, ...base(asig, uid, cliente, null) };
   if (detalle) d.detalle = detalle.slice(0, 300);
-  await setDoc(doc(db, 'asignaciones', asig.id, 'resultados', `${cliente}_ne_${Date.now()}`), d);
+  const b = writeBatch(db);
+  b.set(doc(db, 'asignaciones', asig.id, 'resultados', id), d);
+  liberar(b, asig, uid, id);
+  await b.commit();
 }

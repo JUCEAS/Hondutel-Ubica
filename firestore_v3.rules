@@ -1,0 +1,411 @@
+rules_version = '2';
+
+// =====================================================================
+//  HONDUTEL UBICA - Reglas de seguridad de Firestore (v3, fase 4)
+//
+//  Colecciones:
+//    config/general                           jornadas por area, gracia, dias de anticipacion (solo admin escribe)
+//    usuarios/{uid}                           perfiles (admin, autorizador, tecnico)
+//    asignaciones/{id}                        metadatos de la visita (sin datos de clientes)
+//    asignaciones/{id}/paquete/{cliente}      UN paquete cifrado por cliente (c01..c20)
+//    asignaciones/{id}/estado/actual          el UNICO cliente abierto ahora (uno a la vez)
+//    asignaciones/{id}/resultados/{reg}       "encontrado" / "no encontrado" (solo agregar)
+//    bitacora/{id}                            consultas y aperturas de cada cliente (solo agregar)
+//
+//  Horario: Honduras UTC-6 sin horario de verano. Las horas de config/general
+//  estan en hora de Honduras; aqui se les suman 6 para compararlas en UTC.
+// =====================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Jornada (por area, desde config/general) ----------
+    function cfg() {
+      return get(/databases/$(database)/documents/config/general).data;
+    }
+
+    function jornada(area) {
+      return cfg().jornadas[area];
+    }
+
+    function inicioDiaUTC(t) {
+      return timestamp.date(t.year(), t.month(), t.day());
+    }
+
+    // Hora local h (Honduras) del MISMO DIA de Honduras que t. Se toma la
+    // fecha de Honduras (t - 6 h) y se le suman h + 6 horas desde su medianoche UTC.
+    function horaLocal(t, h) {
+      return inicioDiaUTC(t - duration.value(6, 'h')) + duration.value(h + 6, 'h');
+    }
+
+    function dentroDeJornada(ini, fin, area) {
+      return fin > ini
+        && ini >= horaLocal(ini, jornada(area).inicio)
+        && fin <= horaLocal(ini, jornada(area).fin);
+    }
+
+    function dentroDelTope(ini, fin, area) {
+      return fin <= horaLocal(ini, jornada(area).tope);
+    }
+
+    function jornadaValida(j) {
+      return j is map
+        && j.keys().hasAll(['inicio', 'fin', 'tope'])
+        && j.keys().hasOnly(['inicio', 'fin', 'tope'])
+        && j.inicio is int && j.fin is int && j.tope is int
+        && j.inicio >= 0 && j.inicio < j.fin && j.fin <= j.tope && j.tope <= 23;
+    }
+
+    function configValida(d) {
+      return d.keys().hasAll(['jornadas', 'graciaMinutos', 'maxDias', 'actualizadoPor', 'actualizadoEn'])
+        && d.keys().hasOnly(['jornadas', 'graciaMinutos', 'maxDias', 'actualizadoPor', 'actualizadoEn'])
+        && d.jornadas is map
+        && d.jornadas.keys().hasAll(['mora', 'reparacion'])
+        && d.jornadas.keys().hasOnly(['mora', 'reparacion'])
+        && jornadaValida(d.jornadas.mora)
+        && jornadaValida(d.jornadas.reparacion)
+        && d.graciaMinutos is int && d.graciaMinutos >= 0 && d.graciaMinutos <= 10
+        && d.maxDias is int && d.maxDias >= 0 && d.maxDias <= 14
+        && d.actualizadoPor == request.auth.uid
+        && d.actualizadoEn == request.time;
+    }
+
+    // ---------- Identidad y roles ----------
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    function rutaUsuario(uid) {
+      return /databases/$(database)/documents/usuarios/$(uid);
+    }
+
+    function perfil() {
+      return get(rutaUsuario(request.auth.uid)).data;
+    }
+
+    // Un usuario de Authentication sin perfil creado por el admin no tiene ningun acceso.
+    function activoCon(rol) {
+      return autenticado()
+        && exists(rutaUsuario(request.auth.uid))
+        && perfil().activo == true
+        && perfil().rol == rol;
+    }
+
+    function esAdmin()       { return activoCon('admin'); }
+    function esAutorizador() { return activoCon('autorizador'); }
+    function esTecnico()     { return activoCon('tecnico'); }
+
+    // ---------- Rutas ----------
+    function rutaAsignacion(id) {
+      return /databases/$(database)/documents/asignaciones/$(id);
+    }
+
+    function rutaEncontrado(asigId, cliente) {
+      return /databases/$(database)/documents/asignaciones/$(asigId)/resultados/$(cliente);
+    }
+
+    function rutaEstado(asigId) {
+      return /databases/$(database)/documents/asignaciones/$(asigId)/estado/actual;
+    }
+
+    // Cliente que el tecnico tiene abierto AHORA en esa asignacion ('' = ninguno).
+    function clienteAbierto(asigId) {
+      return exists(rutaEstado(asigId)) ? get(rutaEstado(asigId)).data.cliente : '';
+    }
+
+    // Clientes identificados solo por posicion: c01 ... c20 (sin nombres).
+    // Al tener siempre 2 digitos, se comparan como texto: 'c05' <= 'c08'.
+    function clienteValido(cliente, cantidad) {
+      return cliente.matches('^c(0[1-9]|1[0-9]|20)$')
+        && cliente <= (cantidad < 10 ? 'c0' + string(cantidad) : 'c' + string(cantidad));
+    }
+
+    // ---------- Validaciones ----------
+    function usuarioValido(d) {
+      return d.keys().hasAll(['nombre', 'rol', 'activo', 'actualizadoPor', 'actualizadoEn'])
+        && d.keys().hasOnly(['nombre', 'rol', 'activo', 'correo', 'municipio', 'municipios',
+                             'areas', 'llavePublica', 'actualizadoPor', 'actualizadoEn'])
+        && d.nombre is string && d.nombre.size() > 0 && d.nombre.size() <= 120
+        && d.rol in ['admin', 'autorizador', 'tecnico']
+        && d.activo is bool
+        && (d.rol != 'tecnico'
+            || (d.municipio is string && d.municipio.size() > 0
+                && d.get('llavePublica', '') is string
+                && d.get('llavePublica', '').size() <= 4000))
+        && (d.rol != 'autorizador'
+            || (d.municipios is list && d.municipios.size() > 0 && d.municipios.size() <= 50
+                && d.areas is list && d.areas.size() > 0
+                && d.areas.hasOnly(['mora', 'reparacion'])))
+        && (d.rol == 'autorizador' || !d.keys().hasAny(['areas']))
+        && d.actualizadoPor == request.auth.uid
+        && d.actualizadoEn == request.time;
+    }
+
+    function asignacionValida(d) {
+      let tec = get(rutaUsuario(d.tecnicoUid)).data;
+      return d.keys().hasAll(['tecnicoUid', 'autorizadorUid', 'municipio', 'area', 'inicio', 'fin',
+                              'finOriginal', 'extensiones', 'cantidadClientes', 'revocada', 'creadaEn',
+                              'indice', 'llaveBusqueda'])
+        && d.keys().hasOnly(['tecnicoUid', 'autorizadorUid', 'municipio', 'area', 'inicio', 'fin',
+                             'finOriginal', 'extensiones', 'cantidadClientes', 'revocada', 'creadaEn',
+                             'indice', 'llaveBusqueda'])
+        && d.area in ['mora', 'reparacion']
+        && (esAdmin() || d.area in perfil().areas)
+        && d.indice is map && d.indice.size() == d.cantidadClientes
+        && d.llaveBusqueda is string && d.llaveBusqueda.size() > 0 && d.llaveBusqueda.size() < 2000
+        && d.autorizadorUid == request.auth.uid
+        && d.creadaEn == request.time
+        && d.revocada == false
+        && d.extensiones == 0
+        && d.inicio is timestamp && d.fin is timestamp
+        && d.finOriginal == d.fin
+        && dentroDeJornada(d.inicio, d.fin, d.area)
+        && d.fin > request.time
+        && d.inicio < request.time + duration.value(cfg().maxDias + 1, 'd')
+        && d.cantidadClientes is int && d.cantidadClientes >= 1 && d.cantidadClientes <= 20
+        && tec.rol == 'tecnico'
+        && tec.activo == true
+        && tec.get('llavePublica', '') != ''
+        && d.municipio == tec.municipio
+        && (esAdmin() || d.municipio in perfil().municipios);
+    }
+
+    // Asignacion vigente para el tecnico que hace la peticion (hora del servidor).
+    function vigenteParaMi(a) {
+      return a.tecnicoUid == request.auth.uid
+        && a.revocada == false
+        && request.time >= a.inicio
+        && request.time < a.fin;
+    }
+
+    function puedeVerCliente(asigId, cliente) {
+      return esTecnico()
+        && vigenteParaMi(get(rutaAsignacion(asigId)).data)
+        // Debe existir su registro de consulta antes de leer.
+        && exists(/databases/$(database)/documents/bitacora/$(asigId + '_' + request.auth.uid))
+        // Uno a la vez: solo el cliente que tiene abierto (y la apertura queda en bitacora).
+        && clienteAbierto(asigId) == cliente
+        // Si ya lo marco como "encontrado", la direccion desaparece.
+        && !exists(rutaEncontrado(asigId, cliente));
+    }
+
+    function consultaValida(regId, d) {
+      let a = get(rutaAsignacion(d.asignacionId)).data;
+      let base = d.asignacionId + '_' + request.auth.uid;
+      return d.tecnicoUid == request.auth.uid
+        && d.momento == request.time
+        && d.autorizadorUid == a.autorizadorUid
+        && vigenteParaMi(a)
+        && (
+          (d.keys().hasAll(['tipo', 'asignacionId', 'tecnicoUid', 'autorizadorUid', 'momento'])
+            && d.keys().hasOnly(['tipo', 'asignacionId', 'tecnicoUid', 'autorizadorUid', 'momento'])
+            && d.tipo == 'consulta'
+            && (regId == base || regId.matches('^' + base + '_[0-9]+$')))
+          ||
+          // Apertura de UN cliente (cada vez que lo busca y lo abre).
+          (d.keys().hasAll(['tipo', 'asignacionId', 'tecnicoUid', 'autorizadorUid', 'momento', 'cliente'])
+            && d.keys().hasOnly(['tipo', 'asignacionId', 'tecnicoUid', 'autorizadorUid', 'momento', 'cliente'])
+            && d.tipo == 'apertura'
+            && d.cliente is string
+            && clienteValido(d.cliente, a.cantidadClientes)
+            && regId.matches('^' + base + '_' + d.cliente + '_[0-9]+$'))
+        );
+    }
+
+    // Abrir un cliente (solo si no hay otro abierto) o liberarlo (solo con su resultado registrado).
+    function estadoValido(asigId) {
+      let a = get(rutaAsignacion(asigId)).data;
+      let d = request.resource.data;
+      let previo = resource == null ? '' : resource.data.cliente;
+      return d.keys().hasAll(['cliente', 'tecnicoUid', 'momento'])
+        && d.keys().hasOnly(['cliente', 'tecnicoUid', 'momento', 'registro', 'liberadoPor'])
+        && d.tecnicoUid == request.auth.uid
+        && d.momento == request.time
+        && d.cliente is string
+        && vigenteParaMi(a)
+        && (
+          (d.cliente != '' && previo == ''
+            && clienteValido(d.cliente, a.cantidadClientes)
+            && !exists(rutaEncontrado(asigId, d.cliente))
+            && d.registro is string
+            && d.registro.matches('^' + asigId + '_' + request.auth.uid + '_' + d.cliente + '_[0-9]+$')
+            // La apertura debe quedar registrada EN ESTA MISMA operacion (no sirve una vieja).
+            && !exists(/databases/$(database)/documents/bitacora/$(d.registro))
+            && existsAfter(/databases/$(database)/documents/bitacora/$(d.registro))
+            && !d.keys().hasAny(['liberadoPor']))
+          ||
+          (d.cliente == '' && previo != ''
+            && d.liberadoPor is string
+            && (d.liberadoPor == previo || d.liberadoPor.matches('^' + previo + '_ne_[0-9]+$'))
+            // El resultado debe registrarse EN ESTA MISMA operacion (no sirve uno viejo).
+            && !exists(/databases/$(database)/documents/asignaciones/$(asigId)/resultados/$(d.liberadoPor))
+            && existsAfter(/databases/$(database)/documents/asignaciones/$(asigId)/resultados/$(d.liberadoPor))
+            && !d.keys().hasAny(['registro']))
+        );
+    }
+
+    // GPS opcional al marcar el resultado: los tres campos juntos o ninguno.
+    function gpsValido(d) {
+      return (!d.keys().hasAny(['lat', 'lon', 'precision']))
+        || (d.keys().hasAll(['lat', 'lon', 'precision'])
+            && d.lat is number && d.lat >= -90 && d.lat <= 90
+            && d.lon is number && d.lon >= -180 && d.lon <= 180
+            && d.precision is number && d.precision >= 0);
+    }
+
+    function resultadoValido(asigId, regId, d) {
+      let a = get(rutaAsignacion(asigId)).data;
+      return d.keys().hasAll(['resultado', 'cliente', 'tecnicoUid', 'autorizadorUid', 'momento'])
+        && d.keys().hasOnly(['resultado', 'cliente', 'tecnicoUid', 'autorizadorUid', 'momento',
+                             'motivo', 'detalle', 'lat', 'lon', 'precision'])
+        && d.tecnicoUid == request.auth.uid
+        && d.autorizadorUid == a.autorizadorUid
+        && d.momento == request.time
+        && vigenteParaMi(a)
+        && clienteValido(d.cliente, a.cantidadClientes)
+        // Solo se registra el resultado del cliente que tiene abierto.
+        && clienteAbierto(asigId) == d.cliente
+        && gpsValido(d)
+        && (
+          // Encontrado: un solo registro por cliente, con id = cliente. Oculta la direccion.
+          (d.resultado == 'encontrado'
+            && regId == d.cliente
+            && !d.keys().hasAny(['motivo', 'detalle']))
+          ||
+          // No encontrado: se registra (puede repetirse) pero la direccion sigue visible.
+          (d.resultado == 'no_encontrado'
+            && regId.matches('^' + d.cliente + '_ne_[0-9]+$')
+            && !exists(rutaEncontrado(asigId, d.cliente))
+            && d.motivo in ['nadie_lo_conoce', 'se_fue_del_pais', 'se_mudo', 'fallecio',
+                            'vivienda_cerrada', 'direccion_incorrecta', 'mas_tarde', 'otro']
+            && (!d.keys().hasAny(['detalle'])
+                || (d.detalle is string && d.detalle.size() <= 300)))
+        );
+    }
+
+    function puedeGestionar(a) {
+      return esAdmin()
+        || (esAutorizador()
+            && (a.autorizadorUid == request.auth.uid || a.municipio in perfil().municipios));
+    }
+
+    function esRevocacion() {
+      return puedeGestionar(resource.data)
+        && resource.data.revocada == false
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['revocada', 'revocadaPor', 'revocadaEn'])
+        && request.resource.data.revocada == true
+        && request.resource.data.revocadaPor == request.auth.uid
+        && request.resource.data.revocadaEn == request.time;
+    }
+
+    // Extension de horario: SOLO el administrador, solo ampliar, con motivo y firma del Divisor.
+    function esExtension() {
+      let antes = resource.data;
+      let despues = request.resource.data;
+      return esAdmin()
+        && antes.revocada == false
+        && despues.diff(antes).affectedKeys()
+             .hasOnly(['fin', 'extensiones', 'extendidoPor', 'extendidoEn',
+                       'motivoExtension', 'firmaExtension'])
+        && despues.fin is timestamp
+        && despues.fin > antes.fin
+        && despues.fin > request.time
+        && dentroDelTope(antes.inicio, despues.fin, antes.area)
+        && despues.extensiones == antes.extensiones + 1
+        && despues.extendidoPor == request.auth.uid
+        && despues.extendidoEn == request.time
+        && despues.motivoExtension is string
+        && despues.motivoExtension.size() >= 3 && despues.motivoExtension.size() <= 200
+        && despues.firmaExtension is string
+        && despues.firmaExtension.size() > 0 && despues.firmaExtension.size() < 4000;
+    }
+
+    // ---------- configuracion general ----------
+    match /config/{docId} {
+      allow get: if docId == 'general' && (esAdmin() || esAutorizador() || esTecnico());
+      allow create, update: if docId == 'general' && esAdmin() && configValida(request.resource.data);
+      allow list, delete: if false;
+    }
+
+    // ---------- usuarios ----------
+    match /usuarios/{uid} {
+      allow get: if autenticado()
+        && (request.auth.uid == uid
+            || esAdmin()
+            || (esAutorizador() && resource.data.rol == 'tecnico'));
+      allow list: if esAdmin() || (esAutorizador() && resource.data.rol == 'tecnico');
+      // Solo el admin crea o edita usuarios, y nunca su propio perfil.
+      allow create, update: if esAdmin() && uid != request.auth.uid
+        && usuarioValido(request.resource.data);
+      allow delete: if false;   // se desactiva, no se borra
+    }
+
+    // ---------- asignaciones ----------
+    match /asignaciones/{asigId} {
+      allow get, list: if esAdmin()
+        || (esAutorizador()
+            && (resource.data.autorizadorUid == request.auth.uid
+                || resource.data.municipio in perfil().municipios))
+        || (esTecnico() && resource.data.tecnicoUid == request.auth.uid);
+
+      allow create: if (esAutorizador() || esAdmin()) && asignacionValida(request.resource.data);
+
+      // Unicos cambios permitidos: revocar, o extender (solo admin).
+      allow update: if esRevocacion() || esExtension();
+
+      allow delete: if false;   // queda como registro de auditoria
+
+      // Un paquete cifrado por cliente (c01, c02, ...), creados en el mismo lote.
+      match /paquete/{cliente} {
+        allow create: if (esAutorizador() || esAdmin())
+          && getAfter(rutaAsignacion(asigId)).data.autorizadorUid == request.auth.uid
+          && getAfter(rutaAsignacion(asigId)).data.creadaEn == request.time
+          && clienteValido(cliente, getAfter(rutaAsignacion(asigId)).data.cantidadClientes)
+          && request.resource.data.keys().hasAll(['version', 'cifrado', 'firma'])
+          && request.resource.data.keys().hasOnly(['version', 'cifrado', 'firma'])
+          && request.resource.data.version is int
+          && request.resource.data.cifrado is string
+          && request.resource.data.cifrado.size() > 0
+          && request.resource.data.cifrado.size() < 20000
+          && request.resource.data.firma is string
+          && request.resource.data.firma.size() > 0
+          && request.resource.data.firma.size() < 4000;
+
+        // Solo el tecnico asignado, en horario, no revocado, con bitacora,
+        // y mientras no haya marcado a ese cliente como "encontrado".
+        allow get: if puedeVerCliente(asigId, cliente);
+        allow list, update, delete: if false;
+      }
+
+      // Uno a la vez: el cliente abierto en este momento.
+      match /estado/{docId} {
+        allow get: if (esTecnico() && get(rutaAsignacion(asigId)).data.tecnicoUid == request.auth.uid)
+          || puedeGestionar(get(rutaAsignacion(asigId)).data);
+        allow create, update: if docId == 'actual' && esTecnico() && estadoValido(asigId);
+        allow list, delete: if false;
+      }
+
+      // Resultado de la visita (solo agregar).
+      match /resultados/{regId} {
+        allow create: if esTecnico() && resultadoValido(asigId, regId, request.resource.data);
+        allow get, list: if puedeGestionar(get(rutaAsignacion(asigId)).data)
+          || (esTecnico() && get(rutaAsignacion(asigId)).data.tecnicoUid == request.auth.uid);
+        allow update, delete: if false;
+      }
+    }
+
+    // ---------- bitacora (solo agregar) ----------
+    match /bitacora/{regId} {
+      allow create: if esTecnico() && consultaValida(regId, request.resource.data);
+      allow get, list: if esAdmin()
+        || (esAutorizador() && resource.data.autorizadorUid == request.auth.uid);
+      allow update, delete: if false;
+    }
+
+    // Todo lo demas: denegado.
+    match /{ruta=**} {
+      allow read, write: if false;
+    }
+  }
+}
